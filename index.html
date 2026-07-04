@@ -138,6 +138,7 @@
       <iframe
         id="player"
         src=""
+        sandbox="allow-scripts allow-same-origin allow-presentation allow-forms allow-pointer-lock"
         allowfullscreen
         allow="autoplay; fullscreen; picture-in-picture; playsinline"
         referrerpolicy="no-referrer"
@@ -173,72 +174,91 @@
 
   // ── Click/touch overlay passthrough ─────────────────────────────
   function activatePassthrough() {
+    inPassthrough = true
     player.style.pointerEvents = 'auto'
     shield.style.pointerEvents = 'none'
     clearTimeout(timer)
     timer = setTimeout(function() {
+      inPassthrough = false
       player.style.pointerEvents = 'none'
       shield.style.pointerEvents = 'auto'
-    }, 5000)
+    }, 2000) // 2s only — enough for play/pause, not enough for ad to breathe
   }
   shield.addEventListener('click', activatePassthrough)
   shield.addEventListener('touchstart', activatePassthrough, { passive: true })
 
-  // ── STRICT NAVIGATION & POPUP BLOCKING ──────────────────────────
+  // ── BLOCKING ─────────────────────────────────────────────────────
 
-  // 1. Store the safe URL — any deviation gets caught and reversed
   const SAFE_URL = window.location.href
+  let inPassthrough = false
+  let iframeLoaded = false
 
-  // 2. beforeunload — catches most navigation attempts
+  // Lock window.open via defineProperty so iframe cannot override it
+  try {
+    Object.defineProperty(window, 'open', {
+      value: function() { return null },
+      writable: false,
+      configurable: false
+    })
+  } catch(e) { window.open = function() { return null } }
+
+  // Block document.write
+  document.write = function() {}
+  document.writeln = function() {}
+
+  // Block history tricks
+  try {
+    history.pushState = function() {}
+    history.replaceState = function() {}
+  } catch(e) {}
+
+  // Navigation API — Chrome 102+ — fires BEFORE navigation happens
+  // Cancels cross-origin iframe attempts to navigate the top window
+  if (window.navigation) {
+    window.navigation.addEventListener('navigate', function(e) {
+      try {
+        if (e.destination.url !== SAFE_URL) {
+          e.preventDefault()
+        }
+      } catch(err) {}
+    })
+  }
+
+  // beforeunload — always active — shows "Leave site?" dialog as last resort
   window.addEventListener('beforeunload', function(e) {
     e.preventDefault()
     e.returnValue = ''
     return ''
   })
 
-  // 3. Override window.location setter
-  try {
-    const _loc = window.location
-    Object.defineProperty(window, 'location', {
-      configurable: false,
-      enumerable: true,
-      get: function() { return _loc },
-      set: function() { return false }
-    })
-  } catch(e) {}
-
-  // 4. Override document.location setter
-  try {
-    Object.defineProperty(document, 'location', {
-      configurable: false,
-      get: function() { return window.location },
-      set: function() { return false }
-    })
-  } catch(e) {}
-
-  // 5. Block history navigation tricks
-  try {
-    history.pushState = function() { return false }
-    history.replaceState = function() { return false }
-  } catch(e) {}
-
-  // 6. Block window.open popups completely
-  window.open = function() { return null }
-
-  // 7. Block document.write tricks
-  document.write = function() { return false }
-  document.writeln = function() { return false }
-
-  // 8. Blur → instant focus back (kills popup windows)
+  // Blur → focus back instantly to kill any popup that opened
+  // Run in a tight loop for 2 seconds after blur to fight persistent popups
   window.addEventListener('blur', function() {
-    setTimeout(function() { window.focus() }, 0)
+    let attempts = 0
+    const refocus = setInterval(function() {
+      window.focus()
+      attempts++
+      if (attempts > 20) clearInterval(refocus) // stop after 2s
+    }, 100)
   })
 
-  // 9. Watchdog — polls every 100ms, navigates back if URL changed
-  //    This catches anything that slips past all above layers
+  // If iframe fires load again = it navigated internally → lock and reset
+  player.addEventListener('load', function() {
+    if (iframeLoaded && bhUrl) {
+      clearTimeout(timer)
+      inPassthrough = false
+      player.style.pointerEvents = 'none'
+      shield.style.pointerEvents = 'auto'
+      // Reload original src in case iframe navigated away
+      player.src = bhUrl
+    }
+    iframeLoaded = true
+  })
+
+  // Watchdog — 50ms polling — if URL changed somehow, snap back
   setInterval(function() {
     if (window.location.href !== SAFE_URL) {
       window.location.replace(SAFE_URL)
     }
-  }, 100)
+  }, 50)
 </script>
